@@ -303,12 +303,12 @@ describe("resolveGatewayStartupPluginIds", () => {
 
   it.each([
     [
-      "includes only configured channel plugins at idle startup",
+      "includes model-owner plugins required by the configured agent model",
       createStartupConfig({
         enabledPluginIds: ["voice-call"],
         modelId: "demo-cli/demo-model",
       }),
-      ["demo-channel", "browser", "voice-call"],
+      ["demo-channel", "browser", "demo-provider-plugin", "voice-call"],
     ],
     [
       "keeps bundled startup sidecars with enabledByDefault at idle startup",
@@ -402,7 +402,6 @@ describe("resolveGatewayStartupPluginIds", () => {
       expected: ["demo-channel", "browser"],
     });
   });
-
   it("includes required agent harness owner plugins when the default runtime is forced", () => {
     expectStartupPluginIdsCase({
       config: createStartupConfig({
@@ -453,6 +452,23 @@ describe("resolveGatewayStartupPluginIds", () => {
         },
       } as OpenClawConfig,
       expected: ["demo-channel", "browser"],
+    });
+  });
+
+  it("includes explicit embedded harness plugin ids even without matching model ownership", () => {
+    expectStartupPluginIdsCase({
+      config: {
+        ...createStartupConfig({ noConfiguredChannels: true }),
+        agents: {
+          defaults: {
+            embeddedHarness: {
+              runtime: "demo-global-sidecar",
+              fallback: "none",
+            },
+          },
+        },
+      } as OpenClawConfig,
+      expected: ["browser", "demo-global-sidecar"],
     });
   });
 });

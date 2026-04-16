@@ -1,5 +1,10 @@
 import { collectConfiguredAgentHarnessRuntimes } from "../agents/harness-runtimes.js";
+import { normalizeEmbeddedAgentRuntime } from "../agents/pi-embedded-runner/runtime.js";
 import { listPotentialConfiguredChannelIds } from "../channels/config-presence.js";
+import {
+  resolveAgentModelFallbackValues,
+  resolveAgentModelPrimaryValue,
+} from "../config/model-input.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   resolveMemoryDreamingConfig,
@@ -21,6 +26,7 @@ import {
   passesManifestOwnerBasePolicy,
 } from "./manifest-owner-policy.js";
 import { loadPluginManifestRegistry, type PluginManifestRecord } from "./manifest-registry.js";
+import { resolveOwningPluginIdsForModelRefs } from "./providers.js";
 import { hasKind } from "./slots.js";
 
 function hasRuntimeContractSurface(plugin: PluginManifestRecord): boolean {
@@ -184,6 +190,63 @@ function resolveExplicitMemorySlotStartupPluginId(config: OpenClawConfig): strin
   return normalizePluginId(configuredSlot);
 }
 
+function collectConfiguredAgentModelRefs(config: OpenClawConfig): string[] {
+  const modelRefs = new Set<string>();
+  const addModelRef = (raw: string | undefined) => {
+    const value = raw?.trim();
+    if (value) {
+      modelRefs.add(value);
+    }
+  };
+  const addModelConfigRefs = (model: unknown) => {
+    if (!model) {
+      return;
+    }
+    addModelRef(resolveAgentModelPrimaryValue(model as never));
+    for (const fallback of resolveAgentModelFallbackValues(model as never)) {
+      addModelRef(fallback);
+    }
+  };
+
+  addModelConfigRefs(config.agents?.defaults?.model);
+  if (Array.isArray(config.agents?.list)) {
+    for (const entry of config.agents.list) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      addModelConfigRefs(entry.model);
+    }
+  }
+
+  return [...modelRefs].toSorted((left, right) => left.localeCompare(right));
+}
+
+function collectExplicitEmbeddedHarnessPluginIds(
+  config: OpenClawConfig,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  const pluginIds = new Set<string>();
+  const addRuntime = (raw: string | undefined) => {
+    const runtime = normalizeEmbeddedAgentRuntime(raw);
+    if (runtime !== "auto" && runtime !== "pi") {
+      pluginIds.add(runtime);
+    }
+  };
+
+  addRuntime(env.OPENCLAW_AGENT_RUNTIME);
+  addRuntime(config.agents?.defaults?.embeddedHarness?.runtime);
+  if (Array.isArray(config.agents?.list)) {
+    for (const entry of config.agents.list) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      addRuntime(entry.embeddedHarness?.runtime);
+    }
+  }
+
+  return [...pluginIds].toSorted((left, right) => left.localeCompare(right));
+}
+
 function shouldConsiderForGatewayStartup(params: {
   plugin: PluginManifestRecord;
   startupDreamingPluginIds: ReadonlySet<string>;
@@ -273,9 +336,10 @@ export function resolveGatewayStartupPluginIds(params: {
   const activationSource = createPluginActivationSource({
     config: params.activationSourceConfig ?? params.config,
   });
+  const activationConfig = params.activationSourceConfig ?? params.config;
   const requiredAgentHarnessPluginIds = new Set(
     collectConfiguredAgentHarnessRuntimes(
-      params.activationSourceConfig ?? params.config,
+      activationConfig,
       params.env,
     ).flatMap((runtime) =>
       resolveManifestActivationPluginIds({
@@ -290,6 +354,20 @@ export function resolveGatewayStartupPluginIds(params: {
       }),
     ),
   );
+  const configuredModelPluginIds = resolveOwningPluginIdsForModelRefs({
+    models: collectConfiguredAgentModelRefs(activationConfig),
+    config: params.config,
+    workspaceDir: params.workspaceDir,
+    env: params.env,
+  });
+  const explicitHarnessPluginIds = collectExplicitEmbeddedHarnessPluginIds(
+    activationConfig,
+    params.env,
+  );
+  const requiredDirectRuntimePluginIds = new Set([
+    ...configuredModelPluginIds,
+    ...explicitHarnessPluginIds,
+  ]);
   const startupDreamingPluginIds = resolveGatewayStartupDreamingPluginIds(params.config);
   const explicitMemorySlotStartupPluginId = resolveExplicitMemorySlotStartupPluginId(
     params.activationSourceConfig ?? params.config,
@@ -313,6 +391,9 @@ export function resolveGatewayStartupPluginIds(params: {
           activationSource,
         });
         return activationState.enabled;
+      }
+      if (requiredDirectRuntimePluginIds.has(plugin.id)) {
+        return true;
       }
       if (
         !shouldConsiderForGatewayStartup({
